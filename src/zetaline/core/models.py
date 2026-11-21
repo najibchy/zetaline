@@ -138,3 +138,13 @@ class Position:
         if self.qty == 0:
             return 0.0
         return (mark_price - self.avg_price) * self.qty
+
+
+@dataclass(frozen=True, slots=True)
+class Rejection:
+    """An order that was refused (by the risk manager or the executor)."""
+
+    order: Order
+    reason: str
+    source: str = "unknown"
+    ts_ns: int = field(default_factory=time.time_ns)
