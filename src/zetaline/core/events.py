@@ -16,7 +16,8 @@ from typing import Any
 
 class Topic(str, Enum):
     TICK = "tick"        # market data (Tick)
-    ORDER = "order"      # strategy -> risk -> execution (Order)
+    INTENT = "intent"    # strategy -> risk manager (Order, unchecked)
+    ORDER = "order"      # risk manager -> execution (Order, approved)
     FILL = "fill"        # execution results (Fill)
     REJECT = "reject"    # orders blocked by the risk manager
     CONTROL = "control"  # pause/resume/kill-switch/parameter changes
