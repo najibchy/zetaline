@@ -27,7 +27,10 @@ Environment: 13th Gen Intel(R) Core(TM) i7-1355U | Python 3.12.3 | seed 7, 1 sym
 - Paced latency is higher than stress latency. Likely cause: the loop and CPU idle
   between ticks (wake-up, cold caches, lower clock). Not yet verified.
 - The latency recorder costs about 3 us per tick (18.5 us vs 15.6 us).
-- The stress run had 726 risk rejections; the paced run had none.
+- The stress run had 726 risk rejections; the paced run had none. Cause (verified): the
+  max-loss kill switch tripped (pnl -2,000.89 <= -2,000.00) after many small round trips
+  paid spread and fees. Later buys were blocked, so the stress run is partly a
+  kill-switch run. Raising `max_loss` in the benchmark would give a cleaner comparison.
 
 ## Caveats
 
