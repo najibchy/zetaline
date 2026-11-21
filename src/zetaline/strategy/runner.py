@@ -6,6 +6,12 @@ order, and publish any order to Topic.INTENT (the risk manager's input).
 from __future__ import annotations
 
 from zetaline.core.events import DropPolicy, EventBus, Subscription, Topic
+from zetaline.core.latency import (
+    STAGE_STRATEGY,
+    STAGE_TICK_TO_INTENT,
+    LatencyRecorder,
+    now_ns,
+)
 from zetaline.execution.portfolio import Portfolio
 from zetaline.feed.book import OrderBook
 from zetaline.strategy.base import Strategy
@@ -20,7 +26,10 @@ class StrategyRunner:
         book: OrderBook,
         portfolio: Portfolio,
         strategies: list[Strategy] | None = None,
+        *,
+        latency: LatencyRecorder | None = None,
     ) -> None:
+        self._latency = latency
         self._bus = bus
         self._book = book
         self._portfolio = portfolio
@@ -72,7 +81,10 @@ class StrategyRunner:
             if not strategy.enabled or not strategy.wants(tick.symbol):
                 continue
             try:
+                t0 = now_ns()
                 order = strategy.on_tick(tick, position_qty)
+                if self._latency is not None:
+                    self._latency.record(STAGE_STRATEGY, now_ns() - t0)
             except Exception as exc:  # noqa: BLE001 - a faulty strategy must not kill the loop
                 self.strategy_errors += 1
                 strategy.enabled = False
@@ -88,6 +100,8 @@ class StrategyRunner:
                 continue
             if order is not None:
                 self._bus.publish(Topic.INTENT, order)
+                if self._latency is not None:
+                    self._latency.record(STAGE_TICK_TO_INTENT, now_ns() - tick.recv_ns)
                 self.intents += 1
                 published += 1
         return published

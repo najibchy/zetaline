@@ -10,6 +10,12 @@ import time
 from collections.abc import Callable
 
 from zetaline.core.events import DropPolicy, EventBus, Subscription, Topic
+from zetaline.core.latency import (
+    STAGE_RISK_CHECK,
+    STAGE_TICK_TO_ORDER,
+    LatencyRecorder,
+    now_ns,
+)
 from zetaline.core.models import Order, Rejection, Side
 from zetaline.execution.portfolio import Portfolio
 from zetaline.feed.book import OrderBook
@@ -27,7 +33,10 @@ class RiskManager:
         limits: RiskLimits | None = None,
         fee_buffer_bps: float = 10.0,
         clock_ns: Callable[[], int] = time.time_ns,
+        *,
+        latency: LatencyRecorder | None = None,
     ) -> None:
+        self._latency = latency
         if fee_buffer_bps < 0:
             raise ValueError("fee_buffer_bps must be >= 0")
         self._bus = bus
@@ -154,10 +163,15 @@ class RiskManager:
     # ---- pipeline ----------------------------------------------------
     def process(self, order: Order) -> Order | Rejection:
         """Check one order and publish the outcome."""
+        t0 = now_ns()
         reason = self.check(order)
+        if self._latency is not None:
+            self._latency.record(STAGE_RISK_CHECK, now_ns() - t0)
         if reason is None:
             self.approved += 1
             self._bus.publish(Topic.ORDER, order)
+            if self._latency is not None:
+                self._latency.record(STAGE_TICK_TO_ORDER, now_ns() - order.origin_ns)
             return order
         rejection = Rejection(order=order, reason=reason, source=self.SOURCE)
         self.rejected += 1

@@ -6,6 +6,12 @@ published as Rejection events rather than dropped silently.
 from __future__ import annotations
 
 from zetaline.core.events import DropPolicy, EventBus, Subscription, Topic
+from zetaline.core.latency import (
+    STAGE_EXECUTE,
+    STAGE_TICK_TO_FILL,
+    LatencyRecorder,
+    now_ns,
+)
 from zetaline.core.models import Fill, Order, OrderType, Rejection, Side
 from zetaline.execution.portfolio import Portfolio
 from zetaline.feed.book import OrderBook
@@ -20,7 +26,10 @@ class PaperExecutor:
         book: OrderBook,
         portfolio: Portfolio,
         fee_bps: float = 5.0,
+        *,
+        latency: LatencyRecorder | None = None,
     ) -> None:
+        self._latency = latency
         if fee_bps < 0:
             raise ValueError("fee_bps must be >= 0")
         self._bus = bus
@@ -37,6 +46,7 @@ class PaperExecutor:
 
     def execute(self, order: Order) -> Fill | Rejection:
         """Fill or reject one order, publish the outcome, and return it."""
+        t0 = now_ns()
         tick = self._book.get(order.symbol)
         if tick is None:
             return self._reject(order, f"no market data for {order.symbol}")
@@ -65,6 +75,10 @@ class PaperExecutor:
         self._portfolio.apply_fill(fill)
         self.fills += 1
         self._bus.publish(Topic.FILL, fill)
+        if self._latency is not None:
+            end = now_ns()
+            self._latency.record(STAGE_EXECUTE, end - t0)
+            self._latency.record(STAGE_TICK_TO_FILL, end - order.origin_ns)
         return fill
 
     def _reject(self, order: Order, reason: str) -> Rejection:
