@@ -215,3 +215,97 @@ def test_changing_non_window_param_keeps_state():
     drive(s, [100.0] * 8)
     s.set_params(trade_qty=3.0)
     assert s._state
+
+
+# ---- notional sizing --------------------------------------------------------------
+UP = [100.0] * 8 + [100 + 2 * i for i in range(1, 11)]
+DOWN = [120 - 3 * i for i in range(1, 15)]
+
+
+def test_notional_sizes_by_price_at_entry():
+    orders, pos = drive(make(trade_notional=1_000.0), UP)
+    assert len(orders) == 1  # no resizing during the rest of the uptrend
+    assert orders[0].side is Side.BUY
+    assert orders[0].qty == pytest.approx(1_000.0 / 102.0, abs=1e-6)
+    assert pos == pytest.approx(orders[0].qty)
+
+
+def test_notional_qty_scales_inversely_with_price():
+    low, _ = drive(make(trade_notional=1_000.0), UP)
+    high, _ = drive(make(trade_notional=1_000.0), [p * 10 for p in UP])
+    assert high[0].qty * 10 == pytest.approx(low[0].qty, rel=1e-4)
+
+
+def test_notional_holds_existing_position_without_resizing():
+    s = make(trade_notional=1_000.0)
+    assert all(s.on_tick(tick(p), 5.0) is None for p in UP)
+
+
+def test_notional_exit_sells_whole_position():
+    orders, pos = drive(make(trade_notional=1_000.0), UP + DOWN)
+    assert [o.side for o in orders] == [Side.BUY, Side.SELL]
+    assert orders[1].qty == pytest.approx(orders[0].qty)
+    assert pos == pytest.approx(0.0, abs=1e-9)
+
+
+def test_notional_retries_when_position_not_updated():
+    s = make(trade_notional=1_000.0)
+    orders = [s.on_tick(tick(p), 0.0) for p in UP]
+    assert sum(o is not None for o in orders) > 1
+
+
+def test_notional_params_report_mode():
+    params = make(trade_notional=1_000.0).params()
+    assert set(params) == {"fast", "slow", "trade_notional", "threshold_bps"}
+    assert "trade_qty" not in make(trade_notional=1_000.0).params()
+    assert "trade_notional" not in make().params()
+
+
+def test_notional_takes_precedence_over_qty():
+    s = MomentumStrategy(symbols=["BTC"], fast=3, slow=6, trade_qty=3.0, trade_notional=500.0)
+    assert s.params()["trade_notional"] == 500.0
+
+
+def test_notional_mode_rejects_trade_qty_param():
+    s = make(trade_notional=1_000.0)
+    before = s.params()
+    with pytest.raises(ValueError, match="unknown"):
+        s.set_params(trade_qty=1.0)
+    assert s.params() == before
+
+
+def test_qty_mode_rejects_trade_notional_param():
+    s = make()
+    before = s.params()
+    with pytest.raises(ValueError, match="unknown"):
+        s.set_params(trade_notional=100.0)
+    assert s.params() == before
+
+
+def test_set_notional_returns_old_and_new():
+    s = make(trade_notional=1_000.0)
+    assert s.set_params(trade_notional=2_000.0) == {"trade_notional": (1_000.0, 2_000.0)}
+    assert s.trade_notional == 2_000.0
+
+
+def test_set_notional_invalid_is_atomic():
+    s = make(trade_notional=1_000.0)
+    before = s.params()
+    with pytest.raises(ValueError):
+        s.set_params(trade_notional=5_000.0, fast=10)  # fast >= slow: nothing may apply
+    assert s.params() == before
+    with pytest.raises(TypeError):
+        s.set_params(trade_notional="lots")
+    assert s.params() == before
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf")])
+def test_notional_constructor_rejects_bad_values(bad):
+    with pytest.raises(ValueError):
+        make(trade_notional=bad)
+
+
+@pytest.mark.parametrize("bad", ["x", True, "100"])
+def test_notional_constructor_rejects_bad_types(bad):
+    with pytest.raises(TypeError):
+        make(trade_notional=bad)
