@@ -45,6 +45,21 @@ def pnl(x: float) -> str:
     return f"[{color}]{x:+,.2f}[/{color}]"
 
 
+def _feed_line(feed: dict[str, Any]) -> str:
+    if feed.get("kind") != "live":
+        return "simulator" + ("" if feed.get("alive", True) else " [red](stopped)[/red]")
+    if feed.get("error"):
+        return f"[red]live - ERROR {feed['error']}[/red]"
+    if not feed.get("alive", True):
+        return "[red]live - feed stopped[/red]"
+    state = (
+        "[green]connected[/green]" if feed.get("connected") else "[yellow]connecting[/yellow]"
+    )
+    age = feed.get("last_message_age_s")
+    age_txt = f"{age:.1f}s ago" if age is not None else "none yet"
+    return f"live - {state}, {feed.get('reconnects', 0)} reconnects, last msg {age_txt}"
+
+
 def render_status(st: dict[str, Any]) -> Table:
     pf = st["portfolio"]
     table = Table(title="Zetaline status", show_header=False)
@@ -55,6 +70,8 @@ def render_status(st: dict[str, Any]) -> Table:
     kill = f"[red]ACTIVE[/red] - {st['kill_reason']}" if st["kill_switch"] else "[green]off[/green]"
     table.add_row("kill switch", kill)
     table.add_row("symbols", ", ".join(st["symbols"]))
+    if st.get("feed"):
+        table.add_row("feed", _feed_line(st["feed"]))
     table.add_row("ticks / intents", f"{st['ticks']:,} / {st['intents']:,}")
     table.add_row("approved / rejected", f"{st['approved']:,} / {st['rejected']:,}")
     table.add_row("fills", f"{st['fills']:,}")
@@ -158,12 +175,26 @@ def _daemon_env() -> dict[str, str]:
     return env
 
 
-def _daemon_args(rate: float, seed: int, max_loss: float, cash: float) -> list[str]:
-    return [
+def _daemon_args(
+    rate: float,
+    seed: int,
+    max_loss: float,
+    cash: float,
+    feed: str = "sim",
+    testnet: bool = False,
+    symbols: list[str] | None = None,
+) -> list[str]:
+    args = [
         sys.executable, "-m", "zetaline.daemon",
+        "--feed", feed,
         "--rate", str(rate), "--seed", str(seed),
         "--max-loss", str(max_loss), "--cash", str(cash),
     ]
+    if testnet:
+        args.append("--testnet")
+    if symbols:
+        args += ["--symbols", *symbols]
+    return args
 
 
 # ---- lifecycle ---------------------------------------------------------------------
@@ -173,6 +204,9 @@ def start(
     seed: int = typer.Option(42, help="Simulator seed."),
     max_loss: float = typer.Option(2_000.0, help="Max-loss kill-switch threshold."),
     cash: float = typer.Option(100_000.0, help="Starting cash."),
+    feed: str = typer.Option("sim", help="Market data: sim or live (Binance public)."),
+    testnet: bool = typer.Option(False, "--testnet", help="Live feed: use the testnet host."),
+    symbols: str = typer.Option("", help="Live feed: comma-separated symbols."),
     foreground: bool = typer.Option(False, "--foreground", "-f", help="Run in this terminal."),
 ) -> None:
     """Start the trading daemon."""
@@ -183,7 +217,11 @@ def start(
     except DaemonNotRunning:
         pass
 
-    cmd = _daemon_args(rate, seed, max_loss, cash)
+    if feed not in ("sim", "live"):
+        err.print(f"[red]--feed must be 'sim' or 'live', got {feed!r}[/red]")
+        raise typer.Exit(2)
+    symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    cmd = _daemon_args(rate, seed, max_loss, cash, feed, testnet, symbol_list)
     if foreground:
         raise typer.Exit(subprocess.call(cmd, env=_daemon_env()))
 

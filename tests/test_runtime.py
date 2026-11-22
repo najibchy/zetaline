@@ -24,7 +24,7 @@ def test_config_requires_positive_trade_notional():
 def test_one_strategy_per_symbol_sized_by_notional():
     p = Platform(PlatformConfig(prices={"BTC": 50_000.0}, trade_notional=2_000.0))
     assert p.runner.names() == ["momentum-BTC"]
-    assert p.runner.get("momentum-BTC").params()["trade_qty"] == pytest.approx(0.04)
+    assert p.runner.get("momentum-BTC").params()["trade_notional"] == pytest.approx(2_000.0)
 
 
 async def test_start_runs_pipeline_and_stop_reconciles():

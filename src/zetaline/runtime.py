@@ -7,7 +7,6 @@ the AI agent can use them directly.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -19,6 +18,7 @@ from zetaline.core.models import Fill, Rejection
 from zetaline.execution.paper import PaperExecutor
 from zetaline.execution.portfolio import Portfolio
 from zetaline.feed.book import OrderBook
+from zetaline.feed.live import LiveFeed
 from zetaline.feed.simulator import DEFAULT_PRICES, MarketSimulator
 from zetaline.risk.limits import RiskLimits
 from zetaline.risk.manager import RiskManager
@@ -42,12 +42,17 @@ class PlatformConfig:
     slow: int = 30
     trade_notional: float = 2_000.0
     threshold_bps: float = 1.0
+    feed: str = "sim"  # "sim" (random walk) or "live" (Binance public bookTicker)
+    testnet: bool = False  # live feed only: use the spot testnet host
+    feed_url: str | None = None  # live feed only: override the URL (used by tests)
 
     def __post_init__(self) -> None:
         if not self.prices:
             raise ValueError("at least one symbol is required")
         if self.trade_notional <= 0:
             raise ValueError("trade_notional must be positive")
+        if self.feed not in ("sim", "live"):
+            raise ValueError(f"feed must be 'sim' or 'live', got {self.feed!r}")
 
 
 def _fill_dict(f: Fill) -> dict[str, Any]:
@@ -89,11 +94,11 @@ class Platform:
                 symbols=[symbol],
                 fast=cfg.fast,
                 slow=cfg.slow,
-                trade_qty=round(cfg.trade_notional / price, 6),
+                trade_notional=cfg.trade_notional,
                 threshold_bps=cfg.threshold_bps,
                 name=f"momentum-{symbol}",
             )
-            for symbol, price in cfg.prices.items()
+            for symbol in cfg.prices
         ]
         self.runner = StrategyRunner(
             self.bus, self.book, self.portfolio, strategies, latency=self.latency
@@ -104,14 +109,20 @@ class Platform:
         self.executor = PaperExecutor(
             self.bus, self.book, self.portfolio, fee_bps=cfg.fee_bps, latency=self.latency
         )
-        self.sim = MarketSimulator(
-            self.bus,
-            prices=cfg.prices,
-            seed=cfg.seed,
-            rate_hz=cfg.rate_hz,
-            volatility=cfg.volatility,
-            spread_bps=cfg.spread_bps,
-        )
+        self.feed: MarketSimulator | LiveFeed
+        if cfg.feed == "live":
+            self.feed = LiveFeed(
+                self.bus, list(cfg.prices), testnet=cfg.testnet, url=cfg.feed_url
+            )
+        else:
+            self.feed = MarketSimulator(
+                self.bus,
+                prices=cfg.prices,
+                seed=cfg.seed,
+                rate_hz=cfg.rate_hz,
+                volatility=cfg.volatility,
+                spread_bps=cfg.spread_bps,
+            )
 
         self._fills: deque[dict[str, Any]] = deque(maxlen=RECENT_MAXLEN)
         self._rejects: deque[dict[str, Any]] = deque(maxlen=RECENT_MAXLEN)
@@ -122,7 +133,8 @@ class Platform:
             (self.bus.subscribe(Topic.CONTROL), self._events, dict),
         ]
         self._tasks: list[asyncio.Task] = []
-        self._sim_task: asyncio.Task | None = None
+        self._feed_task: asyncio.Task | None = None
+        self.feed_error = ""
         self._running = False
         self._started_at = 0.0
 
@@ -141,7 +153,8 @@ class Platform:
         for sub, store, convert in self._collectors:
             self._tasks.append(asyncio.create_task(self._collect(sub, store, convert)))
         # Consumers first, producer last, so no early ticks are lost.
-        self._sim_task = asyncio.create_task(self.sim.run())
+        self._feed_task = asyncio.create_task(self.feed.run())
+        self._feed_task.add_done_callback(self._on_feed_done)
 
     @staticmethod
     async def _collect(sub: Subscription, store: deque, convert) -> None:
@@ -151,7 +164,7 @@ class Platform:
     def _drained(self) -> bool:
         dropped_ticks = self.bus.stats()["dropped"].get("tick", 0)
         return (
-            self.runner.ticks + dropped_ticks >= self.sim.ticks_published
+            self.runner.ticks + dropped_ticks >= self.feed.ticks_published
             and self.risk.approved + self.risk.rejected == self.runner.intents
             and self.executor.fills + self.executor.rejects == self.risk.approved
         )
@@ -159,10 +172,14 @@ class Platform:
     async def stop(self, drain_timeout: float = 2.0) -> None:
         if not self._running:
             return
-        if self._sim_task is not None:
-            self._sim_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._sim_task
+        if self._feed_task is not None:
+            self._feed_task.cancel()
+            try:
+                await self._feed_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001 - stop() must never raise
+                self.feed_error = f"{type(exc).__name__}: {exc}"
         deadline = time.monotonic() + drain_timeout
         while not self._drained() and time.monotonic() < deadline:
             await asyncio.sleep(0.005)
@@ -178,7 +195,8 @@ class Platform:
         return {
             "running": self._running,
             "uptime_s": (time.monotonic() - self._started_at) if self._running else 0.0,
-            "symbols": self.sim.symbols,
+            "symbols": self.feed.symbols,
+            "feed": self._feed_status(),
             "ticks": self.runner.ticks,
             "intents": self.runner.intents,
             "approved": self.risk.approved,
@@ -199,6 +217,27 @@ class Platform:
             },
             "bus": self.bus.stats(),
         }
+
+    def _on_feed_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self.feed_error = f"{type(exc).__name__}: {exc}"
+            self.bus.publish(
+                Topic.CONTROL,
+                {"type": "feed_error", "error": self.feed_error, "source": "platform"},
+            )
+
+    def _feed_status(self) -> dict[str, Any]:
+        if isinstance(self.feed, LiveFeed):
+            info: dict[str, Any] = {"kind": "live", **self.feed.stats()}
+        else:
+            info = {"kind": "sim", "ticks_published": self.feed.ticks_published}
+        task = self._feed_task
+        info["alive"] = task is not None and not task.done()
+        info["error"] = self.feed_error
+        return info
 
     def positions(self) -> dict[str, Any]:
         return self.portfolio.snapshot(self.book)["positions"]

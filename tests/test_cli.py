@@ -159,3 +159,86 @@ def test_no_daemon_gives_friendly_error(tmp_path, monkeypatch):
     assert result.exit_code == 1
     assert "No daemon running" in result.output
     assert "Traceback" not in result.output
+
+
+# ---- feed row and start flags ----------------------------------------------------------
+def test_feed_line_sim():
+    assert cli._feed_line({"kind": "sim", "alive": True}) == "simulator"
+    assert "stopped" in cli._feed_line({"kind": "sim", "alive": False})
+
+
+def test_feed_line_live_states():
+    connected = {"kind": "live", "alive": True, "connected": True,
+                 "reconnects": 2, "last_message_age_s": 0.26, "error": ""}
+    out = cli._feed_line(connected)
+    assert "connected" in out
+    assert "2 reconnects" in out
+    assert "0.3s ago" in out
+    connecting = {"kind": "live", "alive": True, "connected": False,
+                  "reconnects": 0, "last_message_age_s": None, "error": ""}
+    out = cli._feed_line(connecting)
+    assert "connecting" in out and "none yet" in out
+    assert "ERROR" in cli._feed_line({**connected, "error": "RuntimeError: boom"})
+    assert "feed stopped" in cli._feed_line({**connected, "alive": False})
+
+
+def test_status_renders_feed_row_and_tolerates_old_payload():
+    with_feed = {**STATUS, "feed": {"kind": "sim", "alive": True}}
+    assert "simulator" in text(cli.render_status(with_feed))
+    assert "feed" not in text(cli.render_status(STATUS)).lower().split("symbols")[1].split("ticks")[0]
+
+
+def test_daemon_args_defaults_and_live_flags():
+    base = cli._daemon_args(100.0, 42, 2_000.0, 100_000.0)
+    assert base[base.index("--feed") + 1] == "sim"
+    assert "--testnet" not in base and "--symbols" not in base
+    live = cli._daemon_args(100.0, 42, 2_000.0, 100_000.0, "live", True, ["BTCUSDT", "ETHUSDT"])
+    assert live[live.index("--feed") + 1] == "live"
+    assert "--testnet" in live
+    assert live[live.index("--symbols") + 1:] == ["BTCUSDT", "ETHUSDT"]
+
+
+def test_start_rejects_unknown_feed_without_spawning(monkeypatch):
+    def no_spawn(*a, **k):
+        raise AssertionError("must not spawn a daemon")
+
+    monkeypatch.setattr(cli.subprocess, "Popen", no_spawn)
+    monkeypatch.setattr(cli, "ControlClient", lambda: _NoDaemon())
+    result = runner.invoke(cli.app, ["start", "--feed", "bogus"])
+    assert result.exit_code == 2
+    assert "--feed must be" in result.output
+
+
+class _NoDaemon:
+    async def call(self, *a, **k):
+        from zetaline.control import DaemonNotRunning
+        raise DaemonNotRunning("none")
+
+
+class _ExitedProc:
+    pid = 1
+    returncode = 1
+
+    def poll(self):
+        return 1
+
+
+def test_start_passes_live_flags_to_daemon(monkeypatch, tmp_path):
+    spawned = {}
+
+    def fake_popen(cmd, **kwargs):
+        spawned["cmd"] = cmd
+        return _ExitedProc()
+
+    monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(cli, "ControlClient", lambda: _NoDaemon())
+    monkeypatch.setattr(cli, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(cli, "LOG_PATH", tmp_path / "daemon.log")
+    result = runner.invoke(
+        cli.app, ["start", "--feed", "live", "--testnet", "--symbols", "btcusdt, ethusdt"]
+    )
+    assert result.exit_code == 1  # the fake daemon "exited early"
+    cmd = spawned["cmd"]
+    assert cmd[cmd.index("--feed") + 1] == "live"
+    assert "--testnet" in cmd
+    assert cmd[cmd.index("--symbols") + 1:] == ["btcusdt", "ethusdt"]
