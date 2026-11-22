@@ -97,3 +97,9 @@ def test_build_url_lowercases_symbols():
 def test_build_url_rejects_bad_symbols(symbols):
     with pytest.raises(ValueError):
         build_url(symbols)
+
+
+@pytest.mark.parametrize("symbol", ["btcusdt\n", "btcusdt\r\n", " btcusdt", "btcusdt "])
+def test_build_url_rejects_whitespace_around_symbol(symbol):
+    with pytest.raises(ValueError):
+        build_url([symbol])

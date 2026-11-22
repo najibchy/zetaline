@@ -42,7 +42,7 @@ def build_url(symbols: Iterable[str], testnet: bool = False) -> str:
     if not names:
         raise ValueError("at least one symbol is required")
     for name in names:
-        if not _SYMBOL_RE.match(name):
+        if not _SYMBOL_RE.fullmatch(name):
             raise ValueError(f"invalid symbol: {name!r}")
     host = TESTNET_HOST if testnet else MAINNET_HOST
     streams = "/".join(f"{name}@bookTicker" for name in names)
