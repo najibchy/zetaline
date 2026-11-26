@@ -92,13 +92,24 @@ class GeminiClient(LLMClient):
         *,
         client: Any = None,
         max_output_tokens: int = 4096,
+        api_version: str = "v1beta",
     ) -> None:
         if not 1 <= max_output_tokens <= 65_536:
             raise ValueError("max_output_tokens must be between 1 and 65536")
+        if not re.fullmatch(r"v\d+(?:alpha|beta)?\d*", api_version):
+            raise ValueError(f"invalid api_version: {api_version!r}")
+        self.api_version = api_version
         self._model = config.model
         self._secret = config.api_key
         self._max_output_tokens = max_output_tokens
-        self._client = client if client is not None else genai.Client(api_key=config.api_key)
+        self._client = (
+            client
+            if client is not None
+            else genai.Client(
+                api_key=config.api_key,
+                http_options=types.HttpOptions(api_version=api_version),
+            )
+        )
         self._parts: OrderedDict[str, Any] = OrderedDict()
 
     # ---- neutral -> Gemini ---------------------------------------------------------

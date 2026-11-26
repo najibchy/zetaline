@@ -464,3 +464,27 @@ async def test_agent_reports_exhausted_quota_instead_of_hanging():
     _, g = client_with([api_error(errors.ClientError, 429, details=details)])
     result = await AgentLoop(RetryingClient(g), ToolRegistry(Stub({}))).ask("q")
     assert result.status == "rate_limited" and not result.ok
+
+
+# ---- API version -----------------------------------------------------------------------------
+def test_api_version_defaults_to_v1beta():
+    assert GeminiClient(CFG, client=NS()).api_version == "v1beta"
+
+
+@pytest.mark.parametrize("version", ["v1", "v1beta", "v1alpha", "v2beta1"])
+def test_valid_api_versions(version):
+    assert GeminiClient(CFG, client=NS(), api_version=version).api_version == version
+
+
+@pytest.mark.parametrize("version", ["", "1", "beta", "v1 beta", "v1\n", "../v1", "v1/beta"])
+def test_invalid_api_versions_are_refused(version):
+    with pytest.raises(ValueError, match="api_version"):
+        GeminiClient(CFG, client=NS(), api_version=version)
+
+
+def test_real_client_uses_the_configured_api_version():
+    g = GeminiClient(CFG, api_version="v1beta")
+    options = getattr(getattr(g._client, "_api_client", None), "_http_options", None)
+    if options is None:
+        pytest.skip("SDK internals changed; cannot inspect the client's API version")
+    assert options.api_version == "v1beta"
